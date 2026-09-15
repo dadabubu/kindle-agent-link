@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Secrets and local configuration — never commit real values
+*.env
+.env
+relay-config.json
+**/secrets/
+
+# Databases and runtime state
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# Private content
+*.epub
+!tests/fixtures/*.epub
+staging/
+library/
+
+# Logs and OS noise
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+{
+  "token": "rotate-me-please",
+  "port": 8765,
+  "db": "agentlink.db",
+  "library": "library",
+  "agent_webhook_url": ""
+}
