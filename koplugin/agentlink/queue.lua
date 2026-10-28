@@ -23,6 +23,7 @@ function Queue:new(opts)
         draining = false,
         drain_scheduled = false,
         drain_requested = false,
+        drain_retry_armed = true,
     }
     setmetatable(o, Queue)
     return o
@@ -88,13 +89,27 @@ function Queue:drain()
         return delivered
     end, function(result)
         self.draining = false
-        if not result or not result.ok then
+        local worker_failed = not result or not result.ok
+        local delivered = 0
+        if worker_failed then
             logger.warn("[agentlink] async queue drain failed")
         else
-            local delivered = tonumber(result.value) or 0
+            delivered = tonumber(result.value) or 0
             if delivered > 0 and #names > delivered then
                 self:scheduleDrain(0.1)
             end
+        end
+        -- A pass that delivered nothing usually means the radio was still
+        -- down (wake-from-sleep wpa retries) and the onNetworkConnected
+        -- fallback may never fire. Allow exactly one 30s retry per failure
+        -- episode: any pass that delivers re-arms it, so this cannot stack
+        -- with onNetworkConnected into a retry storm. Skip while the radio
+        -- is off; reconnecting will retrigger the drain anyway.
+        if delivered > 0 then
+            self.drain_retry_armed = true
+        elseif self.drain_retry_armed and not self.drain_requested and self:_wifiEnabled() then
+            self.drain_retry_armed = false
+            self:scheduleDrain(30)
         end
         if self.drain_requested then
             self.drain_requested = false
@@ -135,6 +150,15 @@ end
 function Queue:_networkRadioOn()
     if type(NetworkMgr.isWifiOn) ~= "function" then return true end
     local ok, value = pcall(NetworkMgr.isWifiOn, NetworkMgr)
+    return not ok or value == true
+end
+
+-- Slightly stricter cousin of _networkRadioOn for retry decisions: tracks
+-- the requested wifi state rather than the raw radio, so a flapping
+-- connection still counts as enabled.
+function Queue:_wifiEnabled()
+    if type(NetworkMgr.isWifiEnabled) ~= "function" then return true end
+    local ok, value = pcall(NetworkMgr.isWifiEnabled, NetworkMgr)
     return not ok or value == true
 end
 

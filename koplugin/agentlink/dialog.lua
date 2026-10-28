@@ -33,6 +33,11 @@ Dialog.__index = Dialog
 
 local MAX_UNREAD_PER_FETCH = 5
 local REPLY_FETCH_WINDOW_SECONDS = 120
+-- Wake-from-sleep backoff: the Kindle radio often comes back late, and a
+-- failed wpa auth means the onNetworkConnected event never fires. Each
+-- network failure schedules exactly one more fetch at the next delay; any
+-- success (data or empty mailbox) resets the counter.
+local REPLY_FETCH_BACKOFF_DELAYS = { 10, 30, 60, 120 }
 local Screen = Device.screen
 local REPLY_INDENT = Screen:scaleBySize(20)
 local REPLY_SIDE_BUTTON_WIDTH = Screen:scaleBySize(44)
@@ -47,6 +52,7 @@ function Dialog:new(opts)
         last_reply_id = 0,
         reply_fetch_scheduled = false,
         reply_fetch_in_flight = false,
+        reply_fetch_backoff_attempts = 0,
         reply_history_in_flight = false,
     }
     setmetatable(o, Dialog)
@@ -319,7 +325,14 @@ function Dialog:fetchAndShowReplies(callback)
     self.reply_fetch_in_flight = true
     local started = self.net:requestJSONAsync("reply-fetch", url, function(payload)
         self.reply_fetch_in_flight = false
-        if not payload or type(payload.replies) ~= "table" or #payload.replies == 0 then
+        if not payload then
+            -- Transport-level failure (timeout, no route, non-200, garbage
+            -- body): signal it so the caller backs off instead of treating
+            -- this like an empty mailbox.
+            callback(false, nil, true)
+            return
+        end
+        if type(payload.replies) ~= "table" or #payload.replies == 0 then
             callback(false)
             return
         end
@@ -356,7 +369,14 @@ function Dialog:scheduleReplyFetch(delay)
     self.reply_fetch_scheduled = true
     UIManager:scheduleIn(delay or 2, function()
         self.reply_fetch_scheduled = false
-        self:fetchAndShowReplies(function(found, matched_expected)
+        self:fetchAndShowReplies(function(found, matched_expected, network_failed)
+            if network_failed then
+                self:_scheduleReplyFetchBackoff()
+                return
+            end
+            -- Any success (with data or an empty mailbox) means the
+            -- transport works again; clear the backoff counter.
+            self.reply_fetch_backoff_attempts = 0
             if matched_expected then
                 self.reply_fetch_deadline = nil
                 self.reply_fetch_expected_event_id = nil
@@ -370,6 +390,25 @@ function Dialog:scheduleReplyFetch(delay)
             end
         end)
     end)
+end
+
+-- One more single-flight fetch at the next backoff delay, then stand down
+-- after the last attempt (onNetworkConnected remains the catch-up trigger).
+-- Going through scheduleReplyFetch keeps the reply_fetch_scheduled /
+-- reply_fetch_in_flight mutexes authoritative, so a retry can never run
+-- alongside the reply window's own 5s refetches.
+function Dialog:_scheduleReplyFetchBackoff()
+    local attempts = self.reply_fetch_backoff_attempts or 0
+    local delay = REPLY_FETCH_BACKOFF_DELAYS[attempts + 1]
+    if not delay then
+        logger.warn("[agentlink] reply fetch backoff exhausted; waiting for network reconnect")
+        return
+    end
+    self.reply_fetch_backoff_attempts = attempts + 1
+    logger.info(string.format(
+        "[agentlink] reply fetch network failure, retry %d/%d in %ds",
+        self.reply_fetch_backoff_attempts, #REPLY_FETCH_BACKOFF_DELAYS, delay))
+    self:scheduleReplyFetch(delay)
 end
 
 -- --- unread surfaces -------------------------------------------------------------

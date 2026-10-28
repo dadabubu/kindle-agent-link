@@ -9,6 +9,9 @@ local Reading = {}
 Reading.__index = Reading
 
 local PROGRESS_PAGE_INTERVAL = 5
+-- Screen-off leak guard: a session that silently survived sleep (missed
+-- Suspend event) must never bill an unbounded asleep window as reading.
+local MAX_SESSION_SECONDS = 6 * 3600
 
 function Reading:new(opts)
     local o = {
@@ -46,6 +49,10 @@ function Reading:endSession()
     if not self.session_active then return true end
     if not self:ensureBookOpen() then return false end
     local duration = math.max(0, os.time() - (self.session_started_at or os.time()))
+    -- Last line of defense against a missed Suspend event (Kindle auto-sleep
+    -- paths): clip the counted duration so a session that crossed screen-off
+    -- cannot bill the asleep time into reading_end.
+    duration = math.min(duration, MAX_SESSION_SECONDS)
     local event = self:buildReadingEvent("reading_end", {
         duration_seconds = duration,
     })
@@ -84,6 +91,13 @@ function Reading:onSuspend()
 end
 
 function Reading:onResume()
+    -- Defensive re-arm: if a Suspend event was missed, the session silently
+    -- survived screen-off and session_started_at still points at bedtime.
+    -- While a session is alive, restart the clock on every wake regardless
+    -- of session_suspended, so the asleep window is never billed.
+    if self.session_active then
+        self.session_started_at = os.time()
+    end
     if not self.session_suspended then return false end
     self.session_suspended = false
     self:startSession()

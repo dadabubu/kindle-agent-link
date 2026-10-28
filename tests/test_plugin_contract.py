@@ -141,6 +141,54 @@ def test_footer_and_menu_badges_use_the_configured_agent_name():
     assert 'string.format("%s（%d）", agent_name, unread)' in main
 
 
+def test_reply_fetch_backs_off_after_network_failure_then_resets():
+    dialog = source(DIALOG)
+    # the delay ladder is exactly 10/30/60/120, one attempt per failure
+    assert "REPLY_FETCH_BACKOFF_DELAYS = { 10, 30, 60, 120 }" in dialog
+    fetch = dialog.split("function Dialog:fetchAndShowReplies(callback)", 1)[1].split(
+        "function Dialog:startReplyFetchWindow", 1
+    )[0]
+    # nil payload from the network layer is signalled as a transport
+    # failure, not folded into an empty mailbox
+    assert "callback(false, nil, true)" in fetch
+    window = dialog.split("function Dialog:scheduleReplyFetch(delay)", 1)[1].split(
+        "function Dialog:_footerUnreadText", 1
+    )[0]
+    assert "if network_failed then" in window
+    assert "self:_scheduleReplyFetchBackoff()" in window
+    # any success (data or empty) clears the counter
+    assert "self.reply_fetch_backoff_attempts = 0" in window
+    # single-flight mutexes stay authoritative on every scheduling path
+    assert (
+        "if self.reply_fetch_scheduled or self.reply_fetch_in_flight then return end"
+        in dialog
+    )
+
+
+def test_reading_resume_restarts_clock_and_resume_is_unconditional():
+    reading = source(READING)
+    resume = reading.split("function Reading:onResume()", 1)[1].split(
+        "function Reading:_chapterAtPage", 1
+    )[0]
+    # a live session re-arms its clock on wake even if Suspend never fired
+    assert "if self.session_active then" in resume
+    assert "self.session_started_at = os.time()" in resume
+    end_session = reading.split("function Reading:endSession()", 1)[1].split(
+        "function Reading:startSession", 1
+    )[0]
+    # duration fuse against a session that silently crossed screen-off
+    assert "math.min(duration, MAX_SESSION_SECONDS)" in end_session
+    assert "MAX_SESSION_SECONDS = 6 * 3600" in reading
+    main = source(MAIN)
+    on_resume = main.split("function AgentLink:onResume()", 1)[1].split(
+        "function AgentLink:onPageUpdate", 1
+    )[0]
+    assert "if self.reading:onResume() then" not in on_resume
+    assert "self.dialog:scheduleReplyFetch(1.5)" in on_resume
+    assert "[agentlink] wifi not ready on resume, ensuring..." in main
+    assert 'require("ui/network/manager")' in main
+
+
 def test_no_private_names_anywhere():
     text = all_source().lower()
     for forbidden in ("sample-private-agent", "sample-private-reader", "sample-private-host", "hermes", "sample-reader",

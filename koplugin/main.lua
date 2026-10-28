@@ -15,7 +15,9 @@ local DataStorage = require("datastorage")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local LuaSettings = require("luasettings")
 local lfs = require("libs/libkoreader-lfs")
+local logger = require("logger")
 local util = require("util")
+local NetworkMgr = require("ui/network/manager")
 local Net = require("agentlink.net")
 local Queue = require("agentlink.queue")
 local Reading = require("agentlink.reading")
@@ -95,10 +97,25 @@ function AgentLink:onSuspend()
 end
 
 function AgentLink:onResume()
-    if self.reading:onResume() then
-        -- Wake from sleep is the natural moment to surface unread replies.
-        self.dialog:scheduleReplyFetch(1.5)
+    self.reading:onResume()
+    -- Wake from sleep is the natural moment to surface unread replies, and
+    -- it is no longer gated on the reading module's own bookkeeping. The
+    -- Kindle radio often comes back late after the wpa restart (or its auth
+    -- fails outright, so onNetworkConnected never fires): nudge the network
+    -- manager once, then let the reply fetcher's backoff retries ride out
+    -- the remaining delay. A failed ensure must not block the wake path.
+    local wifi_ready = true
+    if type(NetworkMgr.isWifiEnabled) == "function" then
+        local ok, enabled = pcall(NetworkMgr.isWifiEnabled, NetworkMgr)
+        if ok then wifi_ready = enabled == true end
     end
+    if not wifi_ready then
+        logger.info("[agentlink] wifi not ready on resume, ensuring...")
+        if type(NetworkMgr.ensureWifiToOneOfNetworks) == "function" then
+            NetworkMgr:ensureWifiToOneOfNetworks()
+        end
+    end
+    self.dialog:scheduleReplyFetch(1.5)
 end
 
 function AgentLink:onPageUpdate(page)
