@@ -21,6 +21,7 @@ function Reading:new(opts)
         session_open_sent = false,
         session_active = false,
         session_suspended = false,
+        session_book = nil,
         last_page_sent = nil,
     }
     setmetatable(o, Reading)
@@ -56,18 +57,32 @@ function Reading:endSession()
     local event = self:buildReadingEvent("reading_end", {
         duration_seconds = duration,
     })
+    -- Book-switch guard: by the time a long-lived session is settled, the UI
+    -- may already show the next book. Credit the session to the book it
+    -- started with, never to whatever the UI happens to be holding now.
+    if event and self.session_book then
+        event.book = self.session_book
+    end
     if not self.queue:sendOrQueue(event) then return false end
     self.session_active = false
     self.session_open_sent = false
+    self.session_book = nil
     return true
 end
 
 function Reading:startSession()
+    -- Book-switch guard: the same Reading instance survives across books.
+    -- If a session is still active when a new book opens, settle the old
+    -- session first so its dangling duration is not billed to the new book.
+    if self.session_active then
+        self:endSession()
+    end
     self.session_started_at = os.time()
     self.session_open_sent = false
     self.session_active = true
     self.last_page_sent = nil
     self.last_chapter_index = nil
+    self.session_book = Context.bookIdentity(self.ui)
     return self:ensureBookOpen()
 end
 

@@ -44,6 +44,12 @@ function Books:_setting(key, default)
     return value
 end
 
+function Books:agentName()
+    local name = self:_setting("agent_name", Config.DEFAULT_AGENT_NAME)
+    if name == "" then return Config.DEFAULT_AGENT_NAME end
+    return name
+end
+
 function Books:_save(key, value)
     self.settings:saveSetting(key, value)
     self.settings:flush()
