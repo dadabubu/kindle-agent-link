@@ -54,6 +54,11 @@ function AgentLink:init()
         net = self.net,
         settings = self.settings,
     }
+    local function on_light_delivered(event_id)
+        self.dialog:onLightDelivered(event_id)
+    end
+    self.dialog_queue.on_light_delivered = on_light_delivered
+    self.legacy_queue.on_light_delivered = on_light_delivered
     -- Book uploads have their own channel, separate from the small JSON
     -- event queues: a stuck transfer cannot delay reading events or replies.
     self.upload_queue = UploadQueue:new{
@@ -78,6 +83,45 @@ function AgentLink:init()
     if self.ui.paging or self.ui.rolling then
         self.dialog:installFooterUnreadSuffix()
     end
+    self:_installBadgeRefresh()
+    self:onDispatcherRegisterActions()
+    require("agentlink.topbar").install(self.ui.menu, function(width, host)
+        return self:_getPanel():buildDropdownContent(width, host)
+    end)
+end
+
+function AgentLink:_installBadgeRefresh()
+    if self.dialog._agentlink_badge_refresh then return end
+    local original = self.dialog._refreshFooter
+    if type(original) ~= "function" then return end
+    self.dialog._agentlink_badge_refresh = true
+    self.dialog._refreshFooter = function(dialog, ...)
+        local result = original(dialog, ...)
+        if self.panel then self.panel:refreshBadge() end
+        return result
+    end
+end
+
+function AgentLink:onDispatcherRegisterActions()
+    require("dispatcher"):registerAction("agentlink_panel", {
+        category = "none", event = "ShowAgentLinkPanel",
+        title = "AgentLink 面板", reader = true,
+    })
+end
+
+function AgentLink:_getPanel()
+    if not self.panel then
+        self.panel = require("agentlink.panel"):new{
+            ui = self.ui, dialog = self.dialog, books = self.books,
+            reading_queue = self.reading_queue, dialog_queue = self.dialog_queue,
+            legacy_queue = self.legacy_queue, upload_queue = self.upload_queue,
+        }
+    end
+    return self.panel
+end
+
+function AgentLink:onShowAgentLinkPanel()
+    return require("agentlink.topbar").show(self.ui.menu)
 end
 
 function AgentLink:onReaderReady()
@@ -93,6 +137,8 @@ function AgentLink:onReaderReady()
 end
 
 function AgentLink:onSuspend()
+    require("agentlink.topbar").cancelPending(self.ui.menu)
+    if self.panel then self.panel:close() end
     self.reading:onSuspend()
 end
 
@@ -127,6 +173,8 @@ function AgentLink:onPosUpdate(_, page)
 end
 
 function AgentLink:onCloseDocument()
+    require("agentlink.topbar").deactivate(self.ui.menu)
+    if self.panel then self.panel:onCloseDocument() end
     self.reading:onCloseDocument()
     self.books:onCloseDocument()
 end
@@ -137,6 +185,7 @@ function AgentLink:onNetworkConnected()
     self.dialog_queue:scheduleDrain(0.5)
     self.dialog:scheduleReplyFetch(1.5)
     self.upload_queue:scheduleDrain(2.0)
+    self.books:onNetworkConnected()
 end
 
 function AgentLink:addToHighlightDialog()
@@ -173,6 +222,11 @@ function AgentLink:addToHighlightDialog()
 end
 
 function AgentLink:addToMainMenu(menu_items)
+    menu_items.agentlink_panel = {
+        text = "AgentLink 面板",
+        sorting_hint = "navi",
+        callback = function() self:onShowAgentLinkPanel() end,
+    }
     local agent_name = self.dialog:agentName()
     local unread = self.dialog.unread_count or 0
     local label

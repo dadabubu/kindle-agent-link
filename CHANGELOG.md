@@ -3,6 +3,35 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2026-11-02]
+
+### Added
+
+- Native KOReader dropdown control panel: independent embedded TouchMenu
+  dropdown tab providing quick access to reply viewing (with badge), library
+  sync actions, local sync queue status, Wi-Fi menu, and hardware frontlight
+  brightness/warmth controls with instant toggle.
+- Per-book offline reply history cached device-side under `agentlink-history/`
+  with automatic cache-first display and online merge.
+- Standalone network subprocess hygiene: glibc resolver reset (`__res_init`)
+  and sweep/closure of leaked inherited socket descriptors before task execution.
+- Owned TLS transport connection recovery: dual DNS peer retry before TLS
+  handshake without hostname/SNI compromise, preserving stock LuaSec config.
+- Queue drain batch watchdog scaling: timeout dynamically accounts for
+  multi-request serial execution (`MAX_DRAIN_PER_PASS * timeout`).
+- Automatic book probe recovery: exponential retry ladder (5/15/30s) with
+  generation fencing to prevent stale probe races across document switches.
+
+### Changed
+
+- Reading-duration accounting corrections: session duration is reliably finalized
+  and credited to the correct book upon document switches, and session clocks
+  are defensively re-armed on wake/resume from sleep so asleep windows are
+  never counted as active reading.
+- Offline backfill & network recovery: quick questions delivered from offline
+  queue trigger reply polling upon delivery, and queue drains automatically
+  resume on network reconnection.
+
 ## [0.1.0-dev] - unreleased
 
 ### Added

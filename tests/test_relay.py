@@ -12,6 +12,7 @@ import json
 import sqlite3
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -58,28 +59,38 @@ def relay_server(tmp_path):
 
 def post(base, path, body=None, *, token=TOKEN, raw=None, headers=None):
     data = raw if raw is not None else json.dumps(body or {}, ensure_ascii=False).encode("utf-8")
-    all_headers = {"Content-Type": "application/json"}
+    all_headers = {"Content-Type": "application/json", "Connection": "close"}
     if token:
         all_headers["Authorization"] = f"Bearer {token}"
     if headers:
         all_headers.update(headers)
-    request = urllib.request.Request(base + path, data=data, headers=all_headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            return response.status, json.loads(response.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as exc:
-        text = exc.read().decode("utf-8")
-        return exc.code, (json.loads(text) if text else {})
+    for attempt in range(3):
+        request = urllib.request.Request(base + path, data=data, headers=all_headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            text = exc.read().decode("utf-8")
+            return exc.code, (json.loads(text) if text else {})
+        except (ConnectionAbortedError, ConnectionResetError):
+            if attempt == 2:
+                raise
+            time.sleep(0.05)
 
 
 def get(base, path, *, token=TOKEN):
-    request = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            return response.status, json.loads(response.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as exc:
-        text = exc.read().decode("utf-8")
-        return exc.code, (json.loads(text) if text else {})
+    for attempt in range(3):
+        request = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {token}", "Connection": "close"})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            text = exc.read().decode("utf-8")
+            return exc.code, (json.loads(text) if text else {})
+        except (ConnectionAbortedError, ConnectionResetError):
+            if attempt == 2:
+                raise
+            time.sleep(0.05)
 
 
 def make_epub(path: Path, title: str, body: str) -> Path:

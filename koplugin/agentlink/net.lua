@@ -12,6 +12,27 @@ local socket = require("socket")
 local socketutil = require("socketutil")
 local https = require("ssl.https")
 local Config = require("agentlink.config")
+-- Capture our owned transport while PluginLoader still exposes this plugin's
+-- module path. Older minimal test/legacy hosts can retain stock HTTPS safely.
+local Transport = (function()
+    local ok, mod = pcall(require, "agentlink.https_transport")
+    if ok then return mod end
+    logger.warn("[agentlink] owned TLS transport unavailable; retaining stock HTTPS")
+end)()
+local function requestHTTPS(request)
+    if Transport then return Transport.request(request) end
+    return https.request(request)
+end
+local SubprocessHygiene = (function()
+    local ok, mod = pcall(require, "agentlink.subprocess_hygiene")
+    return ok and mod or nil
+end)()
+
+local function getSubprocessHygiene()
+    local ok, mod = pcall(require, "agentlink.subprocess_hygiene")
+    if ok and mod then return mod end
+    return SubprocessHygiene
+end
 
 local Net = {}
 Net.__index = Net
@@ -20,6 +41,9 @@ local ASYNC_NETWORK_TIMEOUT_SECONDS = 20
 local ASYNC_NETWORK_POLL_SECONDS = 0.25
 local UPLOAD_BLOCK_TIMEOUT_SECONDS = 15
 local UPLOAD_TOTAL_TIMEOUT_SECONDS = 600
+
+-- Queue batches need one ordinary worker budget per serial request.
+Net.DEFAULT_JOB_TIMEOUT_SECONDS = ASYNC_NETWORK_TIMEOUT_SECONDS
 
 function Net:new(opts)
     local o = {
@@ -45,7 +69,7 @@ function Net:postJSON(payload)
     local sink = {}
     socketutil:set_timeout(5, 15)
     local request_ok, code, _, status = pcall(function()
-        return socket.skip(1, https.request{
+        return socket.skip(1, requestHTTPS{
             url = server_url,
             method = "POST",
             source = ltn12.source.string(body),
@@ -76,7 +100,7 @@ function Net:requestJSON(url)
     local sink = {}
     socketutil:set_timeout(5, 15)
     local request_ok, code, _, status = pcall(function()
-        return socket.skip(1, https.request{
+        return socket.skip(1, requestHTTPS{
             url = url,
             method = "GET",
             sink = ltn12.sink.table(sink),
@@ -108,7 +132,7 @@ function Net:ackReplies(reply_ids)
     local sink = {}
     socketutil:set_timeout(5, 15)
     local request_ok, code = pcall(function()
-        return socket.skip(1, https.request{
+        return socket.skip(1, requestHTTPS{
             url = ack_url,
             method = "POST",
             source = ltn12.source.string(body),
@@ -158,6 +182,9 @@ function Net:_pollAsyncNetworkJobs()
                     error = "network worker result decode failed",
                 }
             end
+            if Transport and type(result) == "table" then
+                Transport.importHints(result.transport_hints)
+            end
             if job.callback then
                 local callback_ok, callback_err = pcall(job.callback, result)
                 if not callback_ok then
@@ -172,11 +199,38 @@ end
 function Net:startAsync(label, task, callback)
     if self.network_jobs[label] then return false end
     local launch_ok, pid, read_fd = pcall(FFIUtil.runInSubProcess, function(_, write_fd)
+        local hygiene = getSubprocessHygiene()
+        if hygiene and type(hygiene.close_inherited_sockets) == "function" then
+            local prep_ok, ok, err, closed, res_ok = pcall(hygiene.close_inherited_sockets)
+            if prep_ok and ok ~= false then
+                local res_str = (res_ok == true) and "true" or (res_ok == false and "false" or "unsupported")
+                local log_msg = string.format("[agentlink] child prep (%s): resolver_reset=%s, sockets_closed=%d",
+                    tostring(label), res_str, tonumber(closed) or 0)
+                if type(logger.info) == "function" then
+                    logger.info(log_msg)
+                elseif type(logger.warn) == "function" then
+                    logger.warn(log_msg)
+                end
+            elseif prep_ok and ok == false then
+                local res_str = (res_ok == true) and "true" or (res_ok == false and "false" or "unsupported")
+                local log_msg = string.format("[agentlink] child prep (%s) unsupported: %s, resolver_reset=%s",
+                    tostring(label), tostring(err), res_str)
+                if type(logger.warn) == "function" then logger.warn(log_msg) end
+            else
+                local log_msg = string.format("[agentlink] child prep (%s) failed: %s",
+                    tostring(label), tostring(ok))
+                if type(logger.warn) == "function" then logger.warn(log_msg) end
+            end
+        else
+            local log_msg = string.format("[agentlink] child prep (%s): hygiene helper unavailable", tostring(label))
+            if type(logger.warn) == "function" then logger.warn(log_msg) end
+        end
         local task_ok, value = pcall(task)
         local result = task_ok and { ok = true, value = value } or {
             ok = false,
             error = tostring(value),
         }
+        if Transport then result.transport_hints = Transport.exportHints() end
         local encode_ok, encoded = pcall(JSON.encode, result)
         if not encode_ok then
             encoded = '{"ok":false,"error":"network worker result encode failed"}'
@@ -223,7 +277,7 @@ function Net:requestJSONPost(url, payload)
     local sink = {}
     socketutil:set_timeout(5, 30)
     local request_ok, code, _, status = pcall(function()
-        return socket.skip(1, https.request{
+        return socket.skip(1, requestHTTPS{
             url = url,
             method = "POST",
             source = ltn12.source.string(body),
@@ -272,7 +326,7 @@ function Net:uploadFile(url, path, headers)
     local sink = {}
     socketutil:set_timeout(UPLOAD_BLOCK_TIMEOUT_SECONDS, UPLOAD_TOTAL_TIMEOUT_SECONDS)
     local request_ok, code, _, status = pcall(function()
-        return socket.skip(1, https.request{
+        return socket.skip(1, requestHTTPS{
             url = url,
             method = "POST",
             source = ltn12.source.file(file),

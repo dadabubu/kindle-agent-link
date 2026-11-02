@@ -17,14 +17,23 @@ Kindle (KOReader plugin)  ──HTTPS──▶  your relay  ──▶  your agen
 ## What it is
 
 - **Reading state sync** — `book_open` / throttled `progress` /
-  `chapter_changed` / `reading_end` events with atomic offline queueing.
+  `chapter_changed` / `reading_end` events with atomic offline queueing and
+  wake-from-sleep duration accounting fixes.
 - **Two selection doors** — highlight anything and send it either as a
   *quick* question (fast, lightweight) or as a *deep* discussion (bounded
   no-spoiler context supplied by the relay/agent side). Door names and the
   agent's display name are configurable.
-- **Asynchronous replies** — replies are stored server-side, surfaced as an
-  unread badge on the reading footer and menus, and delivered to the exact
-  page position that was saved with the question.
+- **Asynchronous replies & offline history** — replies are stored server-side,
+  surfaced as an unread badge on the reading footer and menus, delivered to
+  the exact page position that was saved with the question, and cached locally
+  per-book for offline reading.
+- **Native dropdown control panel** — independent embedded TouchMenu topbar
+  tab offering quick access to reply viewing (with badge), library sync, local
+  queue status, Wi-Fi settings, and hardware frontlight brightness and warmth
+  controls with quick toggle.
+- **Network resilience & subprocess hygiene** — worker subprocess isolation
+  with inherited socket cleanup, glibc resolver resets, dual DNS peer retry
+  before TLS handshake, batch queue watchdog timeouts, and auto probe recovery.
 - **Book transfer interface** — probe / upload / manifest endpoints with
   sampled-MD5 fingerprints, full SHA-256 verification and EPUB validation,
   so your agent reads the same edition you do.
@@ -57,6 +66,17 @@ scripts/privacy-scan   Secret/privacy scanner used before publishing
 
 All endpoints, envelopes and status codes are specified in
 `docs/http-contract.md`.
+
+## Development and Testing
+
+The KOReader plugin is pure Lua and has no external dependencies.
+Running the development test suite requires `pytest` and `lupa` (for LuaJIT 2.1 execution):
+
+```bash
+uv run --with lupa --with pytest python scripts/run-tests.py
+```
+
+These development dependencies are only used for test execution and verification, not by the plugin or relay.
 
 ## Status
 

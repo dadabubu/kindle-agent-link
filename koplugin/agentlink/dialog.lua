@@ -27,6 +27,7 @@ local logger = require("logger")
 local util = require("util")
 local Config = require("agentlink.config")
 local Context = require("agentlink.context")
+local History = require("agentlink.history")
 
 local Dialog = {}
 Dialog.__index = Dialog
@@ -265,6 +266,9 @@ function Dialog:showReplyDialog(replies, history_mode)
     local older_callback
     if index < #replies then
         older_callback = function()
+            if self.current_reply_dialog == dialog then
+                self.current_reply_dialog = nil
+            end
             UIManager:close(dialog)
             self.reply_card_index = index + 1
             self:showReplyDialog(replies, history_mode)
@@ -273,10 +277,20 @@ function Dialog:showReplyDialog(replies, history_mode)
     local newer_callback
     if index > 1 then
         newer_callback = function()
+            if self.current_reply_dialog == dialog then
+                self.current_reply_dialog = nil
+            end
             UIManager:close(dialog)
             self.reply_card_index = index - 1
             self:showReplyDialog(replies, history_mode)
         end
+    end
+    local close_viewer = function()
+        if self.current_reply_dialog == dialog then
+            self.current_reply_dialog = nil
+        end
+        self.reply_viewer_open = false
+        UIManager:close(dialog)
     end
     local buttons = {}
     local actions = {}
@@ -284,7 +298,7 @@ function Dialog:showReplyDialog(replies, history_mode)
         actions[#actions + 1] = {
             text = "返回原文",
             callback = function()
-                UIManager:close(dialog)
+                close_viewer()
                 self:_gotoReplyPosition(reply)
             end,
         }
@@ -292,7 +306,7 @@ function Dialog:showReplyDialog(replies, history_mode)
     actions[#actions + 1] = {
         text = "关闭",
         callback = function()
-            UIManager:close(dialog)
+            close_viewer()
         end,
     }
     buttons[#buttons + 1] = actions
@@ -310,6 +324,11 @@ function Dialog:showReplyDialog(replies, history_mode)
         ),
         dismissable = false,
     }
+    if self.current_reply_dialog and self.current_reply_dialog ~= dialog then
+        UIManager:close(self.current_reply_dialog)
+    end
+    self.current_reply_dialog = dialog
+    self.reply_viewer_open = true
     UIManager:show(dialog)
 end
 
@@ -337,6 +356,8 @@ function Dialog:fetchAndShowReplies(callback)
             return
         end
         self.last_reply_id = tonumber(payload.next_after) or self.last_reply_id
+        local book = Context.bookIdentity(self.ui)
+        if book and book.title then History.merge(book, payload.replies) end
         self.unread_count = self.unread_count + #payload.replies
         self:_refreshFooter()
         self.reply_card_index = 1
@@ -360,7 +381,17 @@ function Dialog:fetchAndShowReplies(callback)
 end
 
 function Dialog:startReplyFetchWindow(event_id)
+    self.reply_fetch_latest_user_event_id = event_id
+    self:onLightDelivered(event_id)
+end
+
+function Dialog:onLightDelivered(event_id)
+    -- Older recovered sends must not hijack a newer question sent in this UI.
+    if self.reply_fetch_latest_user_event_id
+            and self.reply_fetch_latest_user_event_id ~= event_id then return end
     self.reply_fetch_expected_event_id = event_id
+    self.reply_fetch_deadline = os.time() + REPLY_FETCH_WINDOW_SECONDS
+    self.reply_fetch_backoff_attempts = 0
     self:scheduleReplyFetch(3)
 end
 
@@ -468,6 +499,7 @@ end
 
 function Dialog:onReaderReady()
     self:installFooterUnreadSuffix()
+    self:scheduleReplyFetch(1.5)
 end
 
 -- --- envelopes --------------------------------------------------------------------
@@ -579,16 +611,30 @@ end
 -- --- reply viewer --------------------------------------------------------------------
 
 function Dialog:openReplyViewer()
-    if self.reply_history_in_flight then return end
-    if not self.queue:_networkRadioOn() then
-        UIManager:show(InfoMessage:new{
-            text = "离线中，回复将在联网后送达",
-            timeout = 2,
-        })
-        return
-    end
     local book = Context.bookIdentity(self.ui)
     if not book or not book.title then return end
+    local cached = History.load(book)
+    local showing_cached = #cached > 0
+    if showing_cached then
+        self.reply_card_index = 1
+        self:showReplyDialog(cached, true)
+    else
+        self.reply_viewer_open = true
+    end
+    if self.reply_history_in_flight then return end
+    if not self.queue:_networkRadioOn() then
+        if not showing_cached then
+            self.reply_viewer_open = false
+            UIManager:show(InfoMessage:new{
+                text = "离线中，联网后可读取这本书的历史问答",
+                timeout = 2,
+            })
+        end
+        return
+    end
+    -- Reopening during an in-flight fetch must keep its result valid.
+    self.reply_viewer_generation = (self.reply_viewer_generation or 0) + 1
+    local current_generation = self.reply_viewer_generation
     local base_url = self.net.settings:readSetting("replies_url") or Config.DEFAULT_REPLIES_URL
     local url = string.format(
         "%s?history=1&limit=%d&book_title=%s",
@@ -599,7 +645,31 @@ function Dialog:openReplyViewer()
     self.reply_history_in_flight = true
     local started = self.net:requestJSONAsync("reply-history", url, function(payload)
         self.reply_history_in_flight = false
-        if not payload or type(payload.replies) ~= "table" or #payload.replies == 0 then
+        if self.reply_viewer_generation ~= current_generation then return end
+        if not payload or type(payload.replies) ~= "table" then
+            if not showing_cached then
+                self.reply_viewer_open = false
+                UIManager:show(InfoMessage:new{
+                    text = "暂时无法读取历史问答，请联网后重试",
+                    timeout = 3,
+                })
+            end
+            return
+        end
+        if #payload.replies == 0 then
+            if not showing_cached then
+                self.reply_viewer_open = false
+                UIManager:show(InfoMessage:new{
+                    text = "这本书还没有和 " .. self:agentName() .. " 的问答",
+                    timeout = 2,
+                })
+            end
+            return
+        end
+        local replies = History.merge(book, payload.replies)
+        if not self.reply_viewer_open then return end
+        if #replies == 0 then
+            self.reply_viewer_open = false
             UIManager:show(InfoMessage:new{
                 text = "这本书还没有和 " .. self:agentName() .. " 的问答",
                 timeout = 2,
@@ -607,7 +677,7 @@ function Dialog:openReplyViewer()
             return
         end
         self.reply_card_index = 1
-        self:showReplyDialog(payload.replies, true, 1)
+        self:showReplyDialog(replies, true)
     end)
     if not started then
         self.reply_history_in_flight = false

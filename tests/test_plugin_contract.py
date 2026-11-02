@@ -19,8 +19,30 @@ READING = MODULES / "reading.lua"
 DIALOG = MODULES / "dialog.lua"
 BOOKS = MODULES / "books.lua"
 UPLOAD_QUEUE = MODULES / "upload_queue.lua"
+DROPDOWNBODY = MODULES / "dropdownbody.lua"
+HISTORY = MODULES / "history.lua"
+HTTPS_TRANSPORT = MODULES / "https_transport.lua"
+PANEL = MODULES / "panel.lua"
+SUBPROCESS_HYGIENE = MODULES / "subprocess_hygiene.lua"
+TOPBAR = MODULES / "topbar.lua"
 
-ALL_LUA = (MAIN, CONFIG, CONTEXT, NET, QUEUE, READING, DIALOG, BOOKS, UPLOAD_QUEUE)
+ALL_LUA = (
+    MAIN,
+    CONFIG,
+    CONTEXT,
+    NET,
+    QUEUE,
+    READING,
+    DIALOG,
+    BOOKS,
+    UPLOAD_QUEUE,
+    DROPDOWNBODY,
+    HISTORY,
+    HTTPS_TRANSPORT,
+    PANEL,
+    SUBPROCESS_HYGIENE,
+    TOPBAR,
+)
 
 
 def source(path: Path) -> str:
@@ -194,3 +216,103 @@ def test_no_private_names_anywhere():
     for forbidden in ("sample-private-agent", "sample-private-reader", "sample-private-host", "hermes", "sample-reader",
                       "sample-deep-label", "sample-quick-label", "sample-private-endpoint", "e:/sampledata"):
         assert forbidden not in text, f"private name leaked: {forbidden}"
+
+
+def test_subprocess_hygiene_and_tls_transport_wiring():
+    hygiene = source(SUBPROCESS_HYGIENE)
+    assert "function M.reset_resolver()" in hygiene
+    assert "function M.close_inherited_sockets()" in hygiene
+    assert "__res_init" in hygiene
+    assert "/proc/self/fd" in hygiene
+
+    transport = source(HTTPS_TRANSPORT)
+    assert "function Transport.exportHints()" in transport
+    assert "function Transport.importHints(hints)" in transport
+    assert "function Transport.request(request)" in transport
+    assert "MIN_CONNECT_BUDGET_SECONDS = 18" in transport
+
+    net = source(NET)
+    assert 'pcall(require, "agentlink.https_transport")' in net
+    assert 'pcall(require, "agentlink.subprocess_hygiene")' in net
+    assert "Transport.importHints(result.transport_hints)" in net
+    assert "result.transport_hints = Transport.exportHints()" in net
+    assert "hygiene.close_inherited_sockets" in net
+
+
+def test_queue_watchdog_timeout_scaled_to_batch():
+    queue = source(QUEUE)
+    assert 'self.net:setJobTimeout("queue-drain-" .. self.name,' in queue
+    assert "MAX_DRAIN_PER_PASS * self.net.DEFAULT_JOB_TIMEOUT_SECONDS" in queue
+    assert "on_light_delivered" in queue
+
+    net = source(NET)
+    assert "Net.DEFAULT_JOB_TIMEOUT_SECONDS = ASYNC_NETWORK_TIMEOUT_SECONDS" in net
+
+
+def test_auto_probe_recovery_ladder_and_generation_fencing():
+    books = source(BOOKS)
+    assert "AUTO_PROBE_RETRY_DELAYS = { 5, 15, 30 }" in books
+    assert "function Books:_cancelAutoProbeRetry()" in books
+    assert "function Books:_autoProbeIsCurrent(generation, partial_md5)" in books
+    assert "function Books:_scheduleAutoProbe(delay, partial_md5)" in books
+    assert "function Books:_retryAutoProbe(generation, partial_md5)" in books
+    assert "function Books:onNetworkConnected()" in books
+    assert "self.auto_probe_active = false" in books
+
+
+def test_per_book_offline_reply_history():
+    history = source(HISTORY)
+    assert "/agentlink-history/" in history
+    assert "function History.path(book)" in history
+    assert "function History.read(book)" in history
+    assert "function History.load(book)" in history
+    assert "function History.merge(book, incoming)" in history
+    assert 'os.rename(path .. ".tmp", path)' in history
+
+    dialog = source(DIALOG)
+    assert 'require("agentlink.history")' in dialog
+    assert "History.load(book)" in dialog
+    assert "History.merge(book, payload.replies)" in dialog
+
+
+def test_dropdown_panel_and_topbar_integration():
+    topbar = source(TOPBAR)
+    assert 'BUTTON_ID = "agentlink_panel_topbar"' in topbar
+    assert 'icon = "star.full"' in topbar
+    assert "function Topbar.install(menu, build_body)" in topbar
+    assert "function Topbar.show(menu)" in topbar
+    assert "function Topbar.cancelPending(menu)" in topbar
+    assert "function Topbar.deactivate(menu)" in topbar
+
+    dropdown = source(DROPDOWNBODY)
+    assert "查看回复" in dropdown
+    assert "同步书库" in dropdown
+    assert "同步状态" in dropdown
+    assert "Wi-Fi" in dropdown
+    assert "function Body:refreshBadge(count)" in dropdown
+    assert "function Body:refreshLights()" in dropdown
+
+    panel = source(PANEL)
+    assert 'require("agentlink.topbar")' in panel
+    assert 'require("agentlink.dropdownbody")' in panel
+    assert "function Panel:setBrightness(value)" in panel
+    assert "function Panel:setWarmth(value)" in panel
+    assert "function Panel:toggleLight()" in panel
+    assert "function Panel:getStatusText()" in panel
+
+    main = source(MAIN)
+    assert 'require("agentlink.topbar").install' in main
+    assert 'require("dispatcher"):registerAction("agentlink_panel"' in main
+    assert "function AgentLink:onShowAgentLinkPanel()" in main
+    assert "menu_items.agentlink_panel" in main
+
+
+if __name__ == "__main__":
+    tests = [k for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
+    passed = 0
+    for name in sorted(tests):
+        fn = globals()[name]
+        fn()
+        passed += 1
+        print(f"  {name}: PASSED")
+    print(f"test_plugin_contract: {passed}/{len(tests)} tests passed.")

@@ -17,13 +17,19 @@ koreader/plugins/agentlink.koplugin/
 ├── _meta.lua
 ├── main.lua
 └── agentlink/
+    ├── books.lua
     ├── config.lua
     ├── context.lua
+    ├── dialog.lua
+    ├── dropdownbody.lua
+    ├── history.lua
+    ├── https_transport.lua
     ├── net.lua
+    ├── panel.lua
     ├── queue.lua
     ├── reading.lua
-    ├── dialog.lua
-    ├── books.lua
+    ├── subprocess_hygiene.lua
+    ├── topbar.lua
     └── upload_queue.lua
 ```
 
@@ -64,13 +70,19 @@ filesystem does not like partial files.
 - **Selection doors**: hold-select a passage → two entries appear
   (your configured deep and quick labels). The quick door asks for a
   one-line message; the deep door lets you add an optional note.
-- **Replies**: an unread badge (`Agent·N`) appends to the reading footer;
-  the top menu carries the same counter. Open it to read, swipe between
-  replies, return to the saved position. Read receipts are ACKed
-  asynchronously.
-- **Books**: top menu → Tools → your agent's library submenu — send the
-  current book, sync a directory, pause per-book, exclude directories, and
-  choose whether uploads happen during reading or after you close it.
+- **Replies & offline history**: an unread badge (`Agent·N`) appends to
+  the reading footer; the top menu and dropdown panel carry the same counter.
+  Open it to read, swipe between replies, return to the saved position. Replies
+  are cached on-device (`koreader/settings/agentlink-history/`) for offline
+  reading. Read receipts are ACKed asynchronously.
+- **Dropdown control panel**: top menu → AgentLink tab (or menu item) opens the
+  native embedded dropdown panel with quick actions: reply viewer with unread
+  count badge, library sync, queue status display, Wi-Fi menu, and frontlight
+  brightness/warmth sliders with quick on/off toggle.
+- **Books**: top menu → Tools → your agent's library submenu (or through the
+  control panel) — send the current book, sync a directory, pause per-book,
+  exclude directories, and choose whether uploads happen during reading or
+  after you close it.
 
 ## Queue layout on the device
 

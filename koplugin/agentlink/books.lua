@@ -8,6 +8,7 @@
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local UIManager = require("ui/uimanager")
+local logger = require("logger")
 local lfs = require("libs/libkoreader-lfs")
 local util = require("util")
 local Config = require("agentlink.config")
@@ -17,6 +18,7 @@ local Books = {}
 Books.__index = Books
 
 local AUTO_PROBE_DELAY_SECONDS = 4
+local AUTO_PROBE_RETRY_DELAYS = { 5, 15, 30 }
 local MAX_MANIFEST_ENTRIES = 2000
 local SCAN_JOB_TIMEOUT_SECONDS = 300
 local UPLOAD_WHEN_IMMEDIATE = "immediate"
@@ -31,6 +33,10 @@ function Books:new(opts)
         probe_in_flight = false,
         sync_in_flight = false,
         probed_this_session = nil,
+        auto_probe_generation = 0,
+        auto_probe_active = false,
+        auto_probe_retry_count = 0,
+        auto_probe_retry_timer = nil,
     }
     setmetatable(o, Books)
     return o
@@ -245,40 +251,124 @@ end
 
 -- --- lifecycle ---------------------------------------------------------------
 
--- §docs/http-contract: after book_open, probe once per session and queue only the
--- current file when it is missing. Delayed so the open itself stays snappy.
+-- A failed probe is not a completed check. Keep retries finite and fence all
+-- delayed work to the reader opening and file that created it.
+function Books:_cancelAutoProbeRetry()
+    local callback = self.auto_probe_retry_timer
+    self.auto_probe_retry_timer = nil
+    if callback then UIManager:unschedule(callback) end
+end
+
+function Books:_autoProbeIsCurrent(generation, partial_md5)
+    if not self.auto_probe_active or generation ~= self.auto_probe_generation
+        or not self:autoProbeEnabled() then return false end
+    local info = self:currentBookInfo()
+    return info ~= nil and info.partial_md5 == partial_md5
+        and self:_isEpub(info.file) and not self:isPaused(partial_md5)
+end
+
+function Books:_scheduleAutoProbe(delay, partial_md5)
+    self:_cancelAutoProbeRetry()
+    local generation = self.auto_probe_generation
+    local callback
+    callback = function()
+        if self.auto_probe_retry_timer ~= callback then return end
+        self.auto_probe_retry_timer = nil
+        if not self.auto_probe_active or generation ~= self.auto_probe_generation then return end
+        if partial_md5 and not self:_autoProbeIsCurrent(generation, partial_md5) then return end
+        self:_autoProbe()
+    end
+    self.auto_probe_retry_timer = callback
+    UIManager:scheduleIn(delay, callback)
+end
+
+function Books:_retryAutoProbe(generation, partial_md5)
+    if not self:_autoProbeIsCurrent(generation, partial_md5)
+        or self.probed_this_session == partial_md5 or self.auto_probe_retry_timer then return end
+    local attempt = self.auto_probe_retry_count + 1
+    local delay = AUTO_PROBE_RETRY_DELAYS[attempt]
+    if not delay then
+        logger.warn("[agentlink] auto book probe retries exhausted; waiting for reconnect or next open")
+        return
+    end
+    self.auto_probe_retry_count = attempt
+    logger.info("[agentlink] auto book probe retry", attempt, "in", delay, "seconds")
+    self:_scheduleAutoProbe(delay, partial_md5)
+end
+
 function Books:onReaderReady()
+    self:_cancelAutoProbeRetry()
+    self.auto_probe_generation = self.auto_probe_generation + 1
+    self.auto_probe_active = true
+    self.auto_probe_retry_count = 0
     self.probed_this_session = nil
     if not self:autoProbeEnabled() then return end
-    UIManager:scheduleIn(AUTO_PROBE_DELAY_SECONDS, function()
-        self:_autoProbe()
-    end)
+    self:_scheduleAutoProbe(AUTO_PROBE_DELAY_SECONDS)
 end
 
 function Books:_autoProbe()
+    if not self.auto_probe_active or not self:autoProbeEnabled() then return end
     local info = self:currentBookInfo()
-    if not info or not self:_isEpub(info.file) then return end
+    if not info or not info.partial_md5 or not self:_isEpub(info.file) then return end
     if self.probed_this_session == info.partial_md5 then return end
-    self.probed_this_session = info.partial_md5
     if self:isPaused(info.partial_md5) then return end
-    if self:isUploaded(info.partial_md5) then return end
-    if self.queue:hasTaskFor(info.partial_md5) then return end
-    self:probeCurrentBook(function(verdict, probed)
-        if not verdict then return end -- offline: stay quiet, manual send still works
+    if self:isUploaded(info.partial_md5) or self.queue:hasTaskFor(info.partial_md5) then
+        self.probed_this_session = info.partial_md5
+        self:_cancelAutoProbeRetry()
+        return
+    end
+    local generation, partial_md5 = self.auto_probe_generation, info.partial_md5
+    local callback_ran = false
+    local started = self:probeCurrentBook(function(verdict, probed)
+        callback_ran = true
+        if not self:_autoProbeIsCurrent(generation, partial_md5) then return end
+        if not verdict then
+            self:_retryAutoProbe(generation, partial_md5)
+            return
+        end
         probed = probed or info
+        if probed.partial_md5 ~= partial_md5 then
+            self:_retryAutoProbe(generation, partial_md5)
+            return
+        end
         if verdict.status == "present" then
             self:markUploaded(probed.partial_md5, verdict.book)
+            self.probed_this_session = partial_md5
+            self:_cancelAutoProbeRetry()
             return
         end
         if self:_queueBook(probed, false) then
+            self.probed_this_session = partial_md5
+            self:_cancelAutoProbeRetry()
             self:_transient(string.format("《%s》已加入发送队列", probed.title or probed.name))
+        elseif self.queue:hasTaskFor(partial_md5) then
+            self.probed_this_session = partial_md5
+            self:_cancelAutoProbeRetry()
+        else
+            self:_retryAutoProbe(generation, partial_md5)
         end
     end)
+    -- probeCurrentBook returns false without invoking its callback when busy.
+    -- A synchronous start failure does invoke it: do not schedule twice.
+    if not started and not callback_ran then
+        self:_retryAutoProbe(generation, partial_md5)
+    end
+end
+
+function Books:onNetworkConnected()
+    if not self.auto_probe_active or not self:autoProbeEnabled() then return end
+    self:_cancelAutoProbeRetry()
+    -- A real reconnect may try once even after the timer budget is exhausted;
+    -- it does not reset that budget or start an endless timer loop.
+    self:_autoProbe()
 end
 
 -- §docs/http-contract hook: when the reader finds uploads disturb page turns, the timing
 -- setting moves the actual transfer to document close.
 function Books:onCloseDocument()
+    self.auto_probe_active = false
+    self.auto_probe_generation = self.auto_probe_generation + 1
+    self:_cancelAutoProbeRetry()
     if self:uploadWhen() == UPLOAD_WHEN_ON_CLOSE and self.queue:pendingCount() > 0 then
         self.queue:scheduleDrainIfConnected(1.0)
     end

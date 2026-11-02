@@ -72,6 +72,7 @@ function Queue:drain()
     self.draining = true
     local started = self.net:startAsync("queue-drain-" .. self.name, function()
         local delivered = 0
+        local light_event_ids = {}
         for index, name in ipairs(names) do
             if index > MAX_DRAIN_PER_PASS then break end
             local path = self.dir .. "/" .. name
@@ -83,10 +84,14 @@ function Queue:drain()
                 if decode_ok and type(payload) == "table" and self.net:postJSON(payload) then
                     os.remove(path)
                     delivered = delivered + 1
+                    local is_light = payload.kind == "excerpt" and payload.door == "quick"
+                    if is_light and type(payload.event_id) == "string" then
+                        light_event_ids[#light_event_ids + 1] = payload.event_id
+                    end
                 end
             end
         end
-        return delivered
+        return { delivered = delivered, light_event_ids = light_event_ids }
     end, function(result)
         self.draining = false
         local worker_failed = not result or not result.ok
@@ -94,7 +99,18 @@ function Queue:drain()
         if worker_failed then
             logger.warn("[agentlink] async queue drain failed")
         else
-            delivered = tonumber(result.value) or 0
+            if type(result.value) == "table" then
+                delivered = tonumber(result.value.delivered) or 0
+                if type(self.on_light_delivered) == "function"
+                        and type(result.value.light_event_ids) == "table" then
+                    for _, event_id in ipairs(result.value.light_event_ids) do
+                        local ok = pcall(self.on_light_delivered, event_id)
+                        if not ok then logger.warn("[agentlink] light delivery callback failed") end
+                    end
+                end
+            else
+                delivered = tonumber(result.value) or 0
+            end
             if delivered > 0 and #names > delivered then
                 self:scheduleDrain(0.1)
             end
@@ -118,6 +134,11 @@ function Queue:drain()
     end)
     if not started then
         self.draining = false
+    else
+        -- The batch sends up to ten requests serially. A single-request
+        -- watchdog can otherwise kill it after only a few successful posts.
+        self.net:setJobTimeout("queue-drain-" .. self.name,
+            MAX_DRAIN_PER_PASS * self.net.DEFAULT_JOB_TIMEOUT_SECONDS)
     end
 end
 
