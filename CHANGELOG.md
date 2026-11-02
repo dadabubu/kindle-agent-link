@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   queue trigger reply polling upon delivery, and queue drains automatically
   resume on network reconnection.
 
-## [0.1.0-dev] - unreleased
+## [Initial public version] - 2026-09-15
 
 ### Added
 
