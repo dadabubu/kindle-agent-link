@@ -80,7 +80,7 @@ These development dependencies are only used for test execution and verification
 
 ## Status
 
-`0.1.0-dev` — local candidate. The HTTP contract is stable within this
+`v2026.11.02` — [Release](https://github.com/dadabubu/kindle-agent-link/releases/tag/v2026.11.02). The HTTP contract is stable within this
 repository; breaking changes will be listed in `CHANGELOG.md`.
 
 ## License
