@@ -72,7 +72,7 @@ def test_config_defaults_are_placeholders_and_names_configurable():
     assert 'Config.DEFAULT_AGENT_NAME = "Agent"' in text
     assert 'Config.DEFAULT_DEEP_LABEL' in text
     assert 'Config.DEFAULT_QUICK_LABEL' in text
-    assert "sample-private-host" not in all_source().lower()
+    assert "example.com" in text
 
 
 def test_reading_events_use_the_contract_envelope():
@@ -212,10 +212,18 @@ def test_reading_resume_restarts_clock_and_resume_is_unconditional():
 
 
 def test_no_private_names_anywhere():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("privacy_scan", ROOT / "scripts" / "privacy-scan.py")
+    scanner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scanner)
+
+    hits = scanner.findings(root=ROOT)
+    assert hits == [], f"Privacy scanner reported unexpected findings in repo: {hits}"
+
     text = all_source().lower()
-    for forbidden in ("sample-private-agent", "sample-private-reader", "sample-private-host", "hermes", "sample-reader",
-                      "sample-deep-label", "sample-quick-label", "sample-private-endpoint", "e:/sampledata"):
-        assert forbidden not in text, f"private name leaked: {forbidden}"
+    for synthetic_leak in ("synthetic-leak.example.invalid", "forbidden-token-sample"):
+        assert synthetic_leak not in text
 
 
 def test_subprocess_hygiene_and_tls_transport_wiring():
